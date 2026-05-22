@@ -13,7 +13,6 @@ st.write("Upload your fresh dashboard export and reference files to build your f
 
 # 1. FILE UPLOAD INTERFACE
 uploaded_alarm = st.file_uploader("1. Upload Power Alarm Export (.xlsx or .csv)", type=["xlsx", "csv"])
-# WE REMOVED THE 'required' STATUS FROM THE PM PLAN FILE LABELLING
 uploaded_pm = st.file_uploader("2. [OPTIONAL] Upload PM Plan Reference (Defaults to 'IHS' if missing)", type=["xlsx"])
 uploaded_parent = st.file_uploader("3. Upload Parent Sites Reference (Parent-sites-Tx...)", type=["xlsx"])
 
@@ -34,12 +33,33 @@ if uploaded_alarm and uploaded_parent:
     if st.button("🚀 Generate Formatted Alarm Report"):
         with st.spinner("Processing network structures and applying styling configurations..."):
             try:
-                # 2. INGEST DATA SOURCES
-                if uploaded_alarm.name.endswith('.csv'):
-                    df_alarm = pd.read_csv(uploaded_alarm)
-                else:
-                    df_alarm = pd.read_excel(uploaded_alarm)
+                # ==========================================
+                # 2. INGEST DATA SOURCES (WITH HTML FALLBACK DETECTOR)
+                # ==========================================
+                try:
+                    if uploaded_alarm.name.endswith('.csv'):
+                        df_alarm = pd.read_csv(uploaded_alarm)
+                    else:
+                        try:
+                            # Try reading as a standard, native Excel binary file first
+                            df_alarm = pd.read_excel(uploaded_alarm)
+                        except Exception as excel_err:
+                            # Catch format mismatches (like HTML disguised as an Excel filename)
+                            err_msg = str(excel_err).lower()
+                            if "not a zip file" in err_msg or "bad zip file" in err_msg:
+                                # Fallback: Parse out tables embedded inside textual plain-text/HTML structures
+                                html_tables = pd.read_html(uploaded_alarm)
+                                if html_tables:
+                                    df_alarm = html_tables[0]
+                                else:
+                                    raise excel_err
+                            else:
+                                raise excel_err
+                except Exception as read_err:
+                    st.error(f"❌ Could not parse the Alarm Export file: {read_err}. If it continues failing, open the file in Excel manually and use 'Save As' to re-save it explicitly as a true 'Excel Workbook (*.xlsx)'.")
+                    st.stop()
                     
+                # Load the parent directory infrastructure sheet layout
                 df_parent = pd.read_excel(uploaded_parent, sheet_name='Final-Prior-Parent-site-list')
 
                 # Ensure consistent structures and safely convert Site IDs to numeric
