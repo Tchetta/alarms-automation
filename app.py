@@ -15,11 +15,9 @@ st.write("Upload your fresh dashboard export. The application will automatically
 # ==========================================
 # 1. GITHUB MASTER REFERENCE CONFIGURATION
 # ==========================================
-# TODO: Replace this URL with your actual GitHub Raw link once uploaded.
-# To get the raw link: Click your file on GitHub, click the "Raw" button, and copy that URL.
 GITHUB_RAW_REF_URL = "https://raw.githubusercontent.com/Tchetta/alarms-automation/main/ref1.xlsx"
 
-# 2. SINGLE FILE UPLOAD INTERFACE
+# 2. FILE UPLOAD INTERFACE
 uploaded_alarm = st.file_uploader("Upload Power Alarm Export (.xlsx, .csv, or .zip)", type=["xlsx", "csv", "zip"])
 
 def round_to_nearest_30_minutes(dt):
@@ -45,15 +43,15 @@ if uploaded_alarm:
                 st.info("🔄 Connecting to cloud master database reference...")
                 df_ref = pd.read_excel(GITHUB_RAW_REF_URL)
                 
-                # Strip spaces from column headers to prevent accidental naming mismatches
+                # Strip spaces from column headers
                 df_ref.columns = [str(c).strip() for c in df_ref.columns]
                 
-                # Strict structural verification matching your layout
-                required_ref_cols = ['Site ID', 'Site Name', 'Power Co', 'Children']
+                # Verify structural components
+                required_ref_cols = ['Site ID', 'Site Name', 'Power Co', 'Children', 'Backbone Site']
                 missing_ref_cols = [col for col in required_ref_cols if col not in df_ref.columns]
                 
                 if missing_ref_cols:
-                    st.error(f"❌ Master reference file structure mismatch! Missing expected columns: {missing_ref_cols}")
+                    st.error(f"❌ Master reference file structure mismatch! Missing columns: {missing_ref_cols}")
                     st.stop()
                 
                 # Data cleaning for Master Reference
@@ -61,15 +59,15 @@ if uploaded_alarm:
                 df_ref_clean = df_ref.dropna(subset=['Site ID']).copy()
                 df_ref_clean['Site ID'] = df_ref_clean['Site ID'].astype(int)
                 
-                # Map target columns down to lightweight key-value indices
+                # Create dictionaries for fast row lookups
                 power_co_map = df_ref_clean.set_index('Site ID')['Power Co'].to_dict()
                 children_map = df_ref_clean.set_index('Site ID')['Children'].to_dict()
+                backbone_map = df_ref_clean.set_index('Site ID')['Backbone Site'].to_dict()
                 
                 st.success("✅ Master reference synchronized successfully.")
                 
             except Exception as ref_err:
                 st.error(f"❌ Failed to download or parse master reference from GitHub: {ref_err}")
-                st.info("💡 Double check that your GITHUB_RAW_REF_URL is correct and points to a public repository raw file stream.")
                 st.stop()
 
             # ==========================================
@@ -79,7 +77,6 @@ if uploaded_alarm:
                 alarm_file_stream = uploaded_alarm
                 file_name = uploaded_alarm.name.lower()
 
-                # Unzip if file is compressed
                 if file_name.endswith('.zip'):
                     with zipfile.ZipFile(uploaded_alarm) as z:
                         zip_files = z.namelist()
@@ -96,7 +93,6 @@ if uploaded_alarm:
                     try:
                         df_alarm = pd.read_excel(alarm_file_stream)
                     except Exception as excel_err:
-                        # Fallback case for HTML tables disguised as Excel spreadsheets
                         if "not a zip file" in str(excel_err).lower() or "bad zip file" in str(excel_err).lower():
                             html_tables = pd.read_html(alarm_file_stream)
                             if html_tables:
@@ -106,7 +102,6 @@ if uploaded_alarm:
                         else:
                             raise excel_err
                             
-                # Strip spaces from raw alarm columns
                 df_alarm.columns = [str(c).strip() for c in df_alarm.columns]
                 
             except Exception as read_err:
@@ -117,7 +112,6 @@ if uploaded_alarm:
             # 5. DATA TRANSFORMATION & CORRELATION PIPELINE
             # ==========================================
             try:
-                # Target layout extraction structure
                 required_alarm_cols = ['Site ID', 'Site Name', 'Ticket ID', 'Alarm Name', 'First Occurred On', 'Duration(hh:mm:ss)', 'Last Occurred On']
                 missing_alarm_cols = [col for col in required_alarm_cols if col not in df_alarm.columns]
                 
@@ -125,27 +119,31 @@ if uploaded_alarm:
                     st.error(f"❌ Alarm upload missing expected raw columns: {missing_alarm_cols}")
                     st.stop()
                 
-                # Standardize primary IDs
                 df_alarm['Site ID'] = pd.to_numeric(df_alarm['Site ID'].astype(str).str.strip(), errors='coerce')
                 df_clean = df_alarm.dropna(subset=['Site ID']).copy()
                 df_clean['Site ID'] = df_clean['Site ID'].astype(int)
 
-                # Pull primary attributes
                 df_report = df_clean[required_alarm_cols].copy()
-
-                # Perform cloud dictionary mappings
                 df_report['Power Owner'] = df_report['Site ID'].map(power_co_map).fillna("IHS")
                 
-                # Process affected site calculations string safely
-                def format_children(site_id):
-                    val = children_map.get(site_id)
-                    if pd.notna(val) and str(val).strip() != "" and float(val) > 0:
-                        return f"{int(float(val))} sites will be affected"
+                # Dynamic Logic Condition: Backbone prioritization rules
+                def determine_prediction(site_id):
+                    is_backbone = str(backbone_map.get(site_id, '')).strip().lower() == 'yes'
+                    kids_val = children_map.get(site_id)
+                    
+                    try:
+                        kids_count = int(float(kids_val)) if pd.notna(kids_val) and str(kids_val).strip() != "" else 0
+                    except ValueError:
+                        kids_count = 0
+                    
+                    if is_backbone and kids_count < 5:
+                        return "BACKBONE site"
+                    elif kids_count > 0:
+                        return f"{kids_count} sites will be affected"
                     return ""
                 
-                df_report['Prediction'] = df_report['Site ID'].apply(format_children)
+                df_report['Prediction'] = df_report['Site ID'].apply(determine_prediction)
 
-                # Arrange output headers to match exact required production output order
                 final_column_order = [
                     'Site ID', 'Site Name', 'Power Owner', 'Prediction', 
                     'Ticket ID', 'Alarm Name', 'First Occurred On', 
@@ -166,49 +164,66 @@ if uploaded_alarm:
                 ws.title = "Power Alarms Status"
                 ws.views.sheetView[0].showGridLines = True
 
-                # Structural append
-                ws.append(final_column_order)
+                # --- STEP A: GENERATE MERGED TITLE BANNER ---
+                ws.merge_cells("A1:I1")
+                title_cell = ws["A1"]
+                title_cell.value = "Power Alarms on TIS"
+                
+                # Set unified orange fill matching your target theme
+                orange_fill = PatternFill(start_color="FFC000", end_color="FFC000", fill_type="solid")
+                
+                title_cell.fill = orange_fill
+                title_cell.font = Font(name="Calibri", size=14, bold=True, color="000000")
+                title_cell.alignment = Alignment(horizontal="center", vertical="center")
+                ws.row_dimensions[1].height = 30
+
+                # --- STEP B: APPEND DATA UNDER THE TITLE ---
+                ws.append(final_column_order) # This lands on Row 2
                 for r in dataframe_to_rows(df_final, index=False, header=False):
                     ws.append(r)
 
-                # Typography & Palette configurations
-                header_fill = PatternFill(start_color="FFC000", end_color="FFC000", fill_type="solid")
+                # Style configurations
                 header_font = Font(name="Calibri", size=11, bold=True, color="000000")
                 data_font = Font(name="Calibri", size=11, color="000000")
                 
-                # Hardened solid black production cell border grids
                 black_side = Side(border_style="thin", color="000000")
                 grid_border = Border(left=black_side, right=black_side, top=black_side, bottom=black_side)
 
-                ws.auto_filter.ref = f"A1:I{ws.max_row}"
+                # Set auto filter parameters across Row 2 boundaries
+                ws.auto_filter.ref = f"A2:I{ws.max_row}"
+                ws.row_dimensions[2].height = 24
 
-                # Style top row headers
-                for cell in ws[1]:
-                    cell.fill = header_fill
+                # Apply crisp full black borders to the merged title row block components
+                for col in range(1, 10):
+                    ws.cell(row=1, column=col).border = grid_border
+
+                # Style table headers (Row 2) - Using matching orange fill color layout
+                for cell in ws[2]:
+                    cell.fill = orange_fill
                     cell.font = header_font
                     cell.alignment = Alignment(horizontal="center", vertical="center")
                     cell.border = grid_border
 
-                # Style data rows
-                for row in range(2, ws.max_row + 1):
+                # Style data matrix starting down at Row 3
+                for row in range(3, ws.max_row + 1):
+                    ws.row_dimensions[row].height = 18
                     for col in range(1, 10):
                         cell = ws.cell(row=row, column=col)
                         cell.font = data_font
                         cell.border = grid_border
                         
-                        # Structured alignments
                         if col in [1, 5, 7, 8, 9]:
-                            cell.alignment = Alignment(horizontal="center")
+                            cell.alignment = Alignment(horizontal="center", vertical="center")
                         else:
-                            cell.alignment = Alignment(horizontal="left")
+                            cell.alignment = Alignment(horizontal="left", vertical="center")
 
-                # Track context width padding dynamically
+                # Track column widths cleanly
                 for col in ws.columns:
                     max_len = max(len(str(cell.value or '')) for cell in col)
                     col_letter = col[0].column_letter
-                    ws.column_dimensions[col_letter].width = max(max_len + 4, 13)
+                    ws.column_dimensions[col_letter].width = max(max_len + 4, 14)
 
-                # Process file names by rounding timestamps
+                # Process production timestamps
                 try:
                     dates_parsed = pd.to_datetime(df_final['Last Occurred On'], errors='coerce')
                     max_date = dates_parsed.max()
@@ -221,7 +236,6 @@ if uploaded_alarm:
 
                 filename = f"TIS_ALARMS{time_string}.xlsx"
 
-                # Save spreadsheet down to binary buffer stream
                 output_buffer = io.BytesIO()
                 wb.save(output_buffer)
                 output_buffer.seek(0)
