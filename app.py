@@ -136,7 +136,9 @@ if uploaded_alarm and uploaded_parent:
 
             # --- STEP D: EXCEL PRESENTATION ENGINE (openpyxl) ---
             try:
-                wb = load_workbook(io.BytesIO())
+                from openpyxl import Workbook
+                # Instantiate a clean workbook object directly instead of loading an empty stream
+                wb = Workbook()
                 ws = wb.active
                 ws.title = "Power Alarms Status"
                 ws.views.sheetView[0].showGridLines = True
