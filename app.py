@@ -5,14 +5,15 @@ from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
 from openpyxl.utils.dataframe import dataframe_to_rows
 from datetime import datetime, timedelta
 import io
+import zipfile
 
 st.set_page_config(page_title="Power Alarms Processor", page_icon="⚡", layout="centered")
 
 st.title("⚡ Power Alarms Automation Dashboard")
 st.write("Upload your fresh dashboard export and reference files to build your formatted report.")
 
-# 1. FILE UPLOAD INTERFACE
-uploaded_alarm = st.file_uploader("1. Upload Power Alarm Export (.xlsx or .csv)", type=["xlsx", "csv"])
+# 1. FILE UPLOAD INTERFACE (Now accepts .zip files natively!)
+uploaded_alarm = st.file_uploader("1. Upload Power Alarm Export (.xlsx, .csv, or .zip)", type=["xlsx", "csv", "zip"])
 uploaded_pm = st.file_uploader("2. [OPTIONAL] Upload PM Plan Reference (Defaults to 'IHS' if missing)", type=["xlsx"])
 uploaded_parent = st.file_uploader("3. Upload Parent Sites Reference (Parent-sites-Tx...)", type=["xlsx"])
 
@@ -39,17 +40,37 @@ if uploaded_alarm and uploaded_parent:
             # 2. INGEST DATA SOURCES
             # ==========================================
             
-            # --- STEP A: PARSE ALARM EXPORT ---
+            # --- STEP A: PARSE ALARM EXPORT (WITH AUTOMATIC ZIP HANDLING) ---
             try:
-                if uploaded_alarm.name.endswith('.csv'):
-                    df_alarm = pd.read_csv(uploaded_alarm)
+                alarm_file_stream = uploaded_alarm
+                file_name = uploaded_alarm.name.lower()
+
+                # If it's a zip file, open it in memory and extract the real data file inside
+                if file_name.endswith('.zip'):
+                    with zipfile.ZipFile(uploaded_alarm) as z:
+                        # Get the list of filenames inside the zip archive
+                        zip_files = z.namelist()
+                        if not zip_files:
+                            st.error("❌ The uploaded .zip file is empty.")
+                            st.stop()
+                        
+                        # Target the first file inside the archive
+                        internal_filename = zip_files[0]
+                        file_name = internal_filename.lower() # update pointer to match internal file type
+                        
+                        # Read the raw compressed bytes into an in-memory buffer
+                        alarm_file_stream = io.BytesIO(z.read(internal_filename))
+
+                # Now read the stream based on its actual core format (CSV or Excel)
+                if file_name.endswith('.csv'):
+                    df_alarm = pd.read_csv(alarm_file_stream)
                 else:
                     try:
-                        df_alarm = pd.read_excel(uploaded_alarm)
+                        df_alarm = pd.read_excel(alarm_file_stream)
                     except Exception as excel_err:
                         err_msg = str(excel_err).lower()
                         if "not a zip file" in err_msg or "bad zip file" in err_msg:
-                            html_tables = pd.read_html(uploaded_alarm)
+                            html_tables = pd.read_html(alarm_file_stream)
                             if html_tables:
                                 df_alarm = html_tables[0]
                             else:
@@ -83,8 +104,6 @@ if uploaded_alarm and uploaded_parent:
 
                 # Prepare parent sites lookup dictionaries
                 parent_child_dict = df_parent.dropna(subset=[df_parent.columns[0]]).set_index(df_parent.columns[0])[df_parent.columns[5]].to_dict()
-                
-                # Column H (Index 7) is our 'Power Co' property in the Parent Sites structure
                 parent_owner_dict = df_parent.dropna(subset=[df_parent.columns[0]]).set_index(df_parent.columns[0])[df_parent.columns[7]].to_dict()
 
                 # ==========================================
@@ -97,13 +116,11 @@ if uploaded_alarm and uploaded_parent:
                         pm_dict = df_pm.dropna(subset=[df_pm.columns[0]]).set_index(df_pm.columns[0])[df_pm.columns[4]].to_dict()
                         
                         df_clean['Power Owner'] = df_clean['Site ID'].map(pm_dict)
-                        # Fallback to parent file owner (Power Co) if missing in PM file, otherwise fallback to IHS
                         df_clean['Power Owner'] = df_clean['Power Owner'].fillna(df_clean['Site ID'].map(parent_owner_dict)).fillna("IHS")
                     except Exception as pm_err:
                         st.warning(f"⚠️ Could not parse PM Plan sheet properly ({pm_err}). Falling back to Parent Sites Info.")
                         df_clean['Power Owner'] = df_clean['Site ID'].map(parent_owner_dict).fillna("IHS")
                 else:
-                    # If PM file is completely missing, explicitly fall back to Parent Power Co mappings, else default to IHS
                     st.info("ℹ️ PM Plan file missing. Mapping owners via Parent Sites 'Power Co' with 'IHS' fallback.")
                     df_clean['Power Owner'] = df_clean['Site ID'].map(parent_owner_dict).fillna("IHS")
 
@@ -185,18 +202,15 @@ if uploaded_alarm and uploaded_parent:
                 # 5. DYNAMIC FILENAME VIA LAST OCCURRED ON
                 # ==========================================
                 try:
-                    # Convert column to datetime context safely to evaluate max values
                     dates_parsed = pd.to_datetime(df_final['Last Occurred On'], errors='coerce')
                     max_date = dates_parsed.max()
                     
                     if pd.isna(max_date):
-                        # Total fallback if the date column fields were completely unparseable or blank
                         max_date = datetime.now()
                         
                     rounded_time = round_to_nearest_30_minutes(max_date)
                     time_string = rounded_time.strftime("%HH%M")
                 except Exception:
-                    # Ultra fallback to keep the code from crashing over date variations
                     time_string = datetime.now().strftime("%HH%M")
 
                 filename = f"TIS_ALARMS{time_string}.xlsx"
