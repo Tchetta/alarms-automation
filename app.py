@@ -106,6 +106,9 @@ if uploaded_alarm and uploaded_parent:
                 # ==========================================
                 if uploaded_pm:
                     try:
+                        # Log the reception of the file to the interface
+                        st.info(f"📥 Received Power Co Reference File: `{uploaded_pm.name}`")
+                        
                         df_pm = pd.read_excel(uploaded_pm, sheet_name=0)
                         
                         # Fix data types: strip spaces, drop invalid rows, cast to uniform integers
@@ -113,7 +116,10 @@ if uploaded_alarm and uploaded_parent:
                         df_pm_clean = df_pm.dropna(subset=[df_pm.columns[0]]).copy()
                         df_pm_clean.iloc[:, 0] = df_pm_clean.iloc[:, 0].astype(int)
                         
-                        # Build mapping dictionary out of pure, uniform types
+                        # VLOOKUP-equivalent execution logger
+                        st.info(f"⚙️ Extracting data from sheet: `{uploaded_pm.name}` -> Executing lookup matching Site ID (Col A) to Power Company (Col E)...")
+                        
+                        # Build mapping dictionary out of pure, uniform types (Equivalent to Column E index 4)
                         pm_dict = df_pm_clean.set_index(df_pm_clean.columns[0])[df_pm_clean.columns[4]].to_dict()
                         
                         # Try mapping directly via PM Plan reference
@@ -124,6 +130,8 @@ if uploaded_alarm and uploaded_parent:
                         
                         # Fallback step 2: If neither file contains the site, default strictly to "IHS"
                         df_clean['Power Owner'] = df_clean['Power Owner'].fillna("IHS")
+                        
+                        st.success("✅ Power Co Reference map built and cross-referenced successfully.")
                         
                     except Exception as pm_err:
                         st.warning(f"⚠️ Could not cleanly match the PM Plan tracking columns ({pm_err}). Relying on Parent reference data details.")
@@ -168,7 +176,8 @@ if uploaded_alarm and uploaded_parent:
                 header_font = Font(name="Calibri", size=11, bold=True, color="000000")
                 data_font = Font(name="Calibri", size=11, color="000000")
                 
-                thin_side = Side(border_style="thin", color="D3D3D3")
+                # FULL SOLID BORDERS DEFINITION
+                thin_side = Side(border_style="thin", color="000000")
                 grid_border = Border(left=thin_side, right=thin_side, top=thin_side, bottom=thin_side)
 
                 ws.auto_filter.ref = f"A1:I{ws.max_row}"
