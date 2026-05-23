@@ -32,36 +32,45 @@ if uploaded_alarm and uploaded_parent:
     
     if st.button("🚀 Generate Formatted Alarm Report"):
         with st.spinner("Processing network structures and applying styling configurations..."):
+            
+            # ==========================================
+            # 2. INGEST DATA SOURCES (WITH INSULATED ERROR CATCHING)
+            # ==========================================
+            
+            # --- STEP A: PARSE ALARM EXPORT ---
             try:
-                # ==========================================
-                # 2. INGEST DATA SOURCES (WITH HTML FALLBACK DETECTOR)
-                # ==========================================
-                try:
-                    if uploaded_alarm.name.endswith('.csv'):
-                        df_alarm = pd.read_csv(uploaded_alarm)
-                    else:
-                        try:
-                            # Try reading as a standard, native Excel binary file first
-                            df_alarm = pd.read_excel(uploaded_alarm)
-                        except Exception as excel_err:
-                            # Catch format mismatches (like HTML disguised as an Excel filename)
-                            err_msg = str(excel_err).lower()
-                            if "not a zip file" in err_msg or "bad zip file" in err_msg:
-                                # Fallback: Parse out tables embedded inside textual plain-text/HTML structures
-                                html_tables = pd.read_html(uploaded_alarm)
-                                if html_tables:
-                                    df_alarm = html_tables[0]
-                                else:
-                                    raise excel_err
+                if uploaded_alarm.name.endswith('.csv'):
+                    df_alarm = pd.read_csv(uploaded_alarm)
+                else:
+                    try:
+                        # Try reading as a standard, native Excel binary file first
+                        df_alarm = pd.read_excel(uploaded_alarm)
+                    except Exception as excel_err:
+                        # Catch format mismatches (like HTML disguised as an Excel filename)
+                        err_msg = str(excel_err).lower()
+                        if "not a zip file" in err_msg or "bad zip file" in err_msg:
+                            # Fallback: Parse out tables embedded inside textual plain-text/HTML structures
+                            html_tables = pd.read_html(uploaded_alarm)
+                            if html_tables:
+                                df_alarm = html_tables[0]
                             else:
                                 raise excel_err
-                except Exception as read_err:
-                    st.error(f"❌ Could not parse the Alarm Export file: {read_err}. If it continues failing, open the file in Excel manually and use 'Save As' to re-save it explicitly as a true 'Excel Workbook (*.xlsx)'.")
-                    st.stop()
-                    
-                # Load the parent directory infrastructure sheet layout
-                df_parent = pd.read_excel(uploaded_parent, sheet_name='Final-Prior-Parent-site-list')
+                        else:
+                            raise excel_err
+            except Exception as read_err:
+                st.error(f"❌ Could not parse the Alarm Export file: {read_err}. If it continues failing, open the file in Excel manually and use 'Save As' to re-save it explicitly as a true 'Excel Workbook (*.xlsx)'.")
+                st.stop()
 
+            # --- STEP B: PARSE PARENT SITES REFERENCE ---
+            try:
+                # Setting sheet_name=0 forces pandas to read the first sheet regardless of its custom name
+                df_parent = pd.read_excel(uploaded_parent, sheet_name=0)
+            except Exception as parent_err:
+                st.error(f"❌ Error reading the Parent Sites reference file: {parent_err}")
+                st.stop()
+
+            # --- STEP C: PROCESSING DATA PIPELINE ---
+            try:
                 # Ensure consistent structures and safely convert Site IDs to numeric
                 df_alarm['Site ID'] = pd.to_numeric(df_alarm['Site ID'], errors='coerce')
                 df_parent.iloc[:, 0] = pd.to_numeric(df_parent.iloc[:, 0], errors='coerce')  # Col A
@@ -82,14 +91,18 @@ if uploaded_alarm and uploaded_parent:
                 # DYNAMIC POWER OWNER DEFAULT LOGIC
                 # ==========================================
                 if uploaded_pm:
-                    # If the PM file is uploaded, proceed with normal logic
-                    df_pm = pd.read_excel(uploaded_pm, sheet_name='2026_Q2_Planning_MTNC')
-                    df_pm.iloc[:, 0] = pd.to_numeric(df_pm.iloc[:, 0], errors='coerce') # Col A
-                    pm_dict = df_pm.dropna(subset=[df_pm.columns[0]]).set_index(df_pm.columns[0])[df_pm.columns[4]].to_dict()
-                    
-                    df_clean['Power Owner'] = df_clean['Site ID'].map(pm_dict)
-                    # Fallback to parent file owner if missing in PM file, otherwise fallback to IHS
-                    df_clean['Power Owner'] = df_clean['Power Owner'].fillna(df_clean['Site ID'].map(parent_owner_dict)).fillna("IHS")
+                    try:
+                        # Fallback to first sheet (sheet_name=0) if custom Q2 names change down the line
+                        df_pm = pd.read_excel(uploaded_pm, sheet_name=0)
+                        df_pm.iloc[:, 0] = pd.to_numeric(df_pm.iloc[:, 0], errors='coerce') # Col A
+                        pm_dict = df_pm.dropna(subset=[df_pm.columns[0]]).set_index(df_pm.columns[0])[df_pm.columns[4]].to_dict()
+                        
+                        df_clean['Power Owner'] = df_clean['Site ID'].map(pm_dict)
+                        # Fallback to parent file owner if missing in PM file, otherwise fallback to IHS
+                        df_clean['Power Owner'] = df_clean['Power Owner'].fillna(df_clean['Site ID'].map(parent_owner_dict)).fillna("IHS")
+                    except Exception as pm_err:
+                        st.warning(f"⚠️ Could not parse PM Plan sheet properly ({pm_err}). Defaulting to fallback configurations.")
+                        df_clean['Power Owner'] = df_clean['Site ID'].map(parent_owner_dict).fillna("IHS")
                 else:
                     # If PM file is missing, try parent owner column first, otherwise default everything to IHS
                     st.info("ℹ️ PM Plan file missing. Using parent-site mappings and applying 'IHS' fallback.")
@@ -114,7 +127,15 @@ if uploaded_alarm and uploaded_parent:
                 # Sort globally by Site ID numerical value
                 df_final = df_final.sort_values(by='Site ID')
 
-                # 4. EXCEL PRESENTATION ENGINE (openpyxl)
+            except KeyError as key_err:
+                st.error(f"❌ Column Mapping Error: One or more expected columns (e.g., 'Site ID', 'Site Name', etc.) were missing from your file headers. Details: {key_err}")
+                st.stop()
+            except Exception as processing_err:
+                st.error(f"❌ Error during data transformation: {processing_err}")
+                st.stop()
+
+            # --- STEP D: EXCEL PRESENTATION ENGINE (openpyxl) ---
+            try:
                 wb = load_workbook(io.BytesIO())
                 ws = wb.active
                 ws.title = "Power Alarms Status"
@@ -183,7 +204,8 @@ if uploaded_alarm and uploaded_parent:
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
 
-            except Exception as e:
-                st.error(f"Processing error raised: {str(e)}. Double check that referenced sheet names match exactly.")
+            except Exception as excel_layout_err:
+                st.error(f"❌ Failed to build or style the output Excel workbook: {excel_layout_err}")
+                
 else:
     st.warning("Waiting for the Alarm Export and Parent Sites reference file to be uploaded...")
