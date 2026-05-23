@@ -10,12 +10,17 @@ import zipfile
 st.set_page_config(page_title="Power Alarms Processor", page_icon="⚡", layout="centered")
 
 st.title("⚡ Power Alarms Automation Dashboard")
-st.write("Upload your fresh dashboard export and reference files to build your formatted report.")
+st.write("Upload your fresh dashboard export. The application will automatically synchronize with your master reference database.")
 
-# 1. FILE UPLOAD INTERFACE
-uploaded_alarm = st.file_uploader("1. Upload Power Alarm Export (.xlsx, .csv, or .zip)", type=["xlsx", "csv", "zip"])
-uploaded_pm = st.file_uploader("2. [OPTIONAL] Upload PM Plan Reference (Defaults to 'IHS' if missing)", type=["xlsx"])
-uploaded_parent = st.file_uploader("3. Upload Parent Sites Reference (Parent-sites-Tx...)", type=["xlsx"])
+# ==========================================
+# 1. GITHUB MASTER REFERENCE CONFIGURATION
+# ==========================================
+# TODO: Replace this URL with your actual GitHub Raw link once uploaded.
+# To get the raw link: Click your file on GitHub, click the "Raw" button, and copy that URL.
+GITHUB_RAW_REF_URL = "https://raw.githubusercontent.com/Tchetta/alarms-automation/main/ref1.xlsx"
+
+# 2. SINGLE FILE UPLOAD INTERFACE
+uploaded_alarm = st.file_uploader("Upload Power Alarm Export (.xlsx, .csv, or .zip)", type=["xlsx", "csv", "zip"])
 
 def round_to_nearest_30_minutes(dt):
     """Rounds a datetime object up or down to the nearest 30-minute increment."""
@@ -29,29 +34,58 @@ def round_to_nearest_30_minutes(dt):
         dt = dt + timedelta(minutes=(30 - remainder))
     return dt.replace(second=0, microsecond=0)
 
-# THE TRIGGER DEMANDS THE ALARM EXPORT AND PARENT SITES TO RUN
-if uploaded_alarm and uploaded_parent:
-    st.success("Required core files staged successfully.")
-    
+if uploaded_alarm:
     if st.button("🚀 Generate Formatted Alarm Report"):
-        with st.spinner("Processing network structures and applying styling configurations..."):
+        with st.spinner("Fetching database reference from cloud repository and cleaning data..."):
             
             # ==========================================
-            # 2. INGEST DATA SOURCES
+            # 3. FETCH & VALIDATE GITHUB MASTER REFERENCE
             # ==========================================
-            
-            # --- STEP A: PARSE ALARM EXPORT (WITH AUTOMATIC ZIP HANDLING) ---
+            try:
+                st.info("🔄 Connecting to cloud master database reference...")
+                df_ref = pd.read_excel(GITHUB_RAW_REF_URL)
+                
+                # Strip spaces from column headers to prevent accidental naming mismatches
+                df_ref.columns = [str(c).strip() for c in df_ref.columns]
+                
+                # Strict structural verification matching your layout
+                required_ref_cols = ['Site ID', 'Site Name', 'Power Co', 'Children']
+                missing_ref_cols = [col for col in required_ref_cols if col not in df_ref.columns]
+                
+                if missing_ref_cols:
+                    st.error(f"❌ Master reference file structure mismatch! Missing expected columns: {missing_ref_cols}")
+                    st.stop()
+                
+                # Data cleaning for Master Reference
+                df_ref['Site ID'] = pd.to_numeric(df_ref['Site ID'].astype(str).str.strip(), errors='coerce')
+                df_ref_clean = df_ref.dropna(subset=['Site ID']).copy()
+                df_ref_clean['Site ID'] = df_ref_clean['Site ID'].astype(int)
+                
+                # Map target columns down to lightweight key-value indices
+                power_co_map = df_ref_clean.set_index('Site ID')['Power Co'].to_dict()
+                children_map = df_ref_clean.set_index('Site ID')['Children'].to_dict()
+                
+                st.success("✅ Master reference synchronized successfully.")
+                
+            except Exception as ref_err:
+                st.error(f"❌ Failed to download or parse master reference from GitHub: {ref_err}")
+                st.info("💡 Double check that your GITHUB_RAW_REF_URL is correct and points to a public repository raw file stream.")
+                st.stop()
+
+            # ==========================================
+            # 4. PARSE LOCAL ALARM EXPORT
+            # ==========================================
             try:
                 alarm_file_stream = uploaded_alarm
                 file_name = uploaded_alarm.name.lower()
 
+                # Unzip if file is compressed
                 if file_name.endswith('.zip'):
                     with zipfile.ZipFile(uploaded_alarm) as z:
                         zip_files = z.namelist()
                         if not zip_files:
-                            st.error("❌ The uploaded .zip file is empty.")
+                            st.error("❌ The uploaded .zip archive contains no files.")
                             st.stop()
-                        
                         internal_filename = zip_files[0]
                         file_name = internal_filename.lower()
                         alarm_file_stream = io.BytesIO(z.read(internal_filename))
@@ -62,8 +96,8 @@ if uploaded_alarm and uploaded_parent:
                     try:
                         df_alarm = pd.read_excel(alarm_file_stream)
                     except Exception as excel_err:
-                        err_msg = str(excel_err).lower()
-                        if "not a zip file" in err_msg or "bad zip file" in err_msg:
+                        # Fallback case for HTML tables disguised as Excel spreadsheets
+                        if "not a zip file" in str(excel_err).lower() or "bad zip file" in str(excel_err).lower():
                             html_tables = pd.read_html(alarm_file_stream)
                             if html_tables:
                                 df_alarm = html_tables[0]
@@ -71,146 +105,115 @@ if uploaded_alarm and uploaded_parent:
                                 raise excel_err
                         else:
                             raise excel_err
+                            
+                # Strip spaces from raw alarm columns
+                df_alarm.columns = [str(c).strip() for c in df_alarm.columns]
+                
             except Exception as read_err:
-                st.error(f"❌ Could not parse the Alarm Export file: {read_err}.")
+                st.error(f"❌ Could not interpret the uploaded Alarm Export: {read_err}")
                 st.stop()
 
-            # --- STEP B: PARSE PARENT SITES REFERENCE ---
+            # ==========================================
+            # 5. DATA TRANSFORMATION & CORRELATION PIPELINE
+            # ==========================================
             try:
-                df_parent = pd.read_excel(uploaded_parent, sheet_name=0)
-            except Exception as parent_err:
-                st.error(f"❌ Error reading the Parent Sites reference file: {parent_err}")
-                st.stop()
-
-            # --- STEP C: PROCESSING DATA PIPELINE ---
-            try:
-                # Core Alarm Cleanup: Strip formatting and cast to clean numeric integers
+                # Target layout extraction structure
+                required_alarm_cols = ['Site ID', 'Site Name', 'Ticket ID', 'Alarm Name', 'First Occurred On', 'Duration(hh:mm:ss)', 'Last Occurred On']
+                missing_alarm_cols = [col for col in required_alarm_cols if col not in df_alarm.columns]
+                
+                if missing_alarm_cols:
+                    st.error(f"❌ Alarm upload missing expected raw columns: {missing_alarm_cols}")
+                    st.stop()
+                
+                # Standardize primary IDs
                 df_alarm['Site ID'] = pd.to_numeric(df_alarm['Site ID'].astype(str).str.strip(), errors='coerce')
-                df_alarm = df_alarm.dropna(subset=['Site ID'])
-                df_alarm['Site ID'] = df_alarm['Site ID'].astype(int)
+                df_clean = df_alarm.dropna(subset=['Site ID']).copy()
+                df_clean['Site ID'] = df_clean['Site ID'].astype(int)
 
-                # Parent Sites Cleanup: Standardize Column A tracking indices
-                df_parent.iloc[:, 0] = pd.to_numeric(df_parent.iloc[:, 0].astype(str).str.strip(), errors='coerce')
-                df_parent_clean = df_parent.dropna(subset=[df_parent.columns[0]]).copy()
-                df_parent_clean.iloc[:, 0] = df_parent_clean.iloc[:, 0].astype(int)
+                # Pull primary attributes
+                df_report = df_clean[required_alarm_cols].copy()
 
-                keep_cols = ['Site ID', 'Site Name', 'Ticket ID', 'Alarm Name', 'First Occurred On', 'Duration(hh:mm:ss)', 'Last Occurred On']
-                df_clean = df_alarm[keep_cols].copy()
+                # Perform cloud dictionary mappings
+                df_report['Power Owner'] = df_report['Site ID'].map(power_co_map).fillna("IHS")
+                
+                # Process affected site calculations string safely
+                def format_children(site_id):
+                    val = children_map.get(site_id)
+                    if pd.notna(val) and str(val).strip() != "" and float(val) > 0:
+                        return f"{int(float(val))} sites will be affected"
+                    return ""
+                
+                df_report['Prediction'] = df_report['Site ID'].apply(format_children)
 
-                # Build lookups from standard parent references
-                parent_child_dict = df_parent_clean.set_index(df_parent_clean.columns[0])[df_parent_clean.columns[5]].to_dict()
-                parent_owner_dict = df_parent_clean.set_index(df_parent_clean.columns[0])[df_parent_clean.columns[7]].to_dict()
-
-                # ==========================================
-                # HARDENED DYNAMIC POWER OWNER LOGIC
-                # ==========================================
-                if uploaded_pm:
-                    try:
-                        # Log the reception of the file to the interface
-                        st.info(f"📥 Received Power Co Reference File: `{uploaded_pm.name}`")
-                        
-                        df_pm = pd.read_excel(uploaded_pm, sheet_name=0)
-                        
-                        # Fix data types: strip spaces, drop invalid rows, cast to uniform integers
-                        df_pm.iloc[:, 0] = pd.to_numeric(df_pm.iloc[:, 0].astype(str).str.strip(), errors='coerce')
-                        df_pm_clean = df_pm.dropna(subset=[df_pm.columns[0]]).copy()
-                        df_pm_clean.iloc[:, 0] = df_pm_clean.iloc[:, 0].astype(int)
-                        
-                        # VLOOKUP-equivalent execution logger
-                        st.info(f"⚙️ Extracting data from sheet: `{uploaded_pm.name}` -> Executing lookup matching Site ID (Col A) to Power Company (Col E)...")
-                        
-                        # Build mapping dictionary out of pure, uniform types (Equivalent to Column E index 4)
-                        pm_dict = df_pm_clean.set_index(df_pm_clean.columns[0])[df_pm_clean.columns[4]].to_dict()
-                        
-                        # Try mapping directly via PM Plan reference
-                        df_clean['Power Owner'] = df_clean['Site ID'].map(pm_dict)
-                        
-                        # Fallback step 1: If PM Plan didn't have it, try mapping from Parent Sites Power Co
-                        df_clean['Power Owner'] = df_clean['Power Owner'].fillna(df_clean['Site ID'].map(parent_owner_dict))
-                        
-                        # Fallback step 2: If neither file contains the site, default strictly to "IHS"
-                        df_clean['Power Owner'] = df_clean['Power Owner'].fillna("IHS")
-                        
-                        st.success("✅ Power Co Reference map built and cross-referenced successfully.")
-                        
-                    except Exception as pm_err:
-                        st.warning(f"⚠️ Could not cleanly match the PM Plan tracking columns ({pm_err}). Relying on Parent reference data details.")
-                        df_clean['Power Owner'] = df_clean['Site ID'].map(parent_owner_dict).fillna("IHS")
-                else:
-                    st.info("ℹ️ PM Plan file missing. Mapping owners via Parent Sites 'Power Co' with 'IHS' fallback.")
-                    df_clean['Power Owner'] = df_clean['Site ID'].map(parent_owner_dict).fillna("IHS")
-
-                # Parse operational child site counts 
-                temp_children = df_clean['Site ID'].map(parent_child_dict)
-                df_clean['Prediction'] = temp_children.apply(
-                    lambda x: f"{int(x)} sites will be affected" if pd.notna(x) and isinstance(x, (int, float)) else ""
-                )
-
+                # Arrange output headers to match exact required production output order
                 final_column_order = [
                     'Site ID', 'Site Name', 'Power Owner', 'Prediction', 
                     'Ticket ID', 'Alarm Name', 'First Occurred On', 
                     'Duration(hh:mm:ss)', 'Last Occurred On'
                 ]
-                df_final = df_clean[final_column_order].copy()
-                df_final = df_final.sort_values(by='Site ID')
+                df_final = df_report[final_column_order].sort_values(by='Site ID')
 
-            except KeyError as key_err:
-                st.error(f"❌ Column Mapping Error: Expected headers are structural issues. Details: {key_err}")
-                st.stop()
             except Exception as processing_err:
-                st.error(f"❌ Error during data transformation: {processing_err}")
+                st.error(f"❌ Data alignment failed: {processing_err}")
                 st.stop()
 
-            # --- STEP D: EXCEL PRESENTATION ENGINE (openpyxl) ---
+            # ==========================================
+            # 6. ENGINE PRESENTATION & STYLING (openpyxl)
+            # ==========================================
             try:
                 wb = Workbook()
                 ws = wb.active
                 ws.title = "Power Alarms Status"
                 ws.views.sheetView[0].showGridLines = True
 
+                # Structural append
                 ws.append(final_column_order)
                 for r in dataframe_to_rows(df_final, index=False, header=False):
                     ws.append(r)
 
+                # Typography & Palette configurations
                 header_fill = PatternFill(start_color="FFC000", end_color="FFC000", fill_type="solid")
                 header_font = Font(name="Calibri", size=11, bold=True, color="000000")
                 data_font = Font(name="Calibri", size=11, color="000000")
                 
-                # FULL SOLID BORDERS DEFINITION
-                thin_side = Side(border_style="thin", color="000000")
-                grid_border = Border(left=thin_side, right=thin_side, top=thin_side, bottom=thin_side)
+                # Hardened solid black production cell border grids
+                black_side = Side(border_style="thin", color="000000")
+                grid_border = Border(left=black_side, right=black_side, top=black_side, bottom=black_side)
 
                 ws.auto_filter.ref = f"A1:I{ws.max_row}"
 
+                # Style top row headers
                 for cell in ws[1]:
                     cell.fill = header_fill
                     cell.font = header_font
                     cell.alignment = Alignment(horizontal="center", vertical="center")
                     cell.border = grid_border
 
+                # Style data rows
                 for row in range(2, ws.max_row + 1):
                     for col in range(1, 10):
                         cell = ws.cell(row=row, column=col)
                         cell.font = data_font
                         cell.border = grid_border
                         
+                        # Structured alignments
                         if col in [1, 5, 7, 8, 9]:
                             cell.alignment = Alignment(horizontal="center")
                         else:
                             cell.alignment = Alignment(horizontal="left")
 
+                # Track context width padding dynamically
                 for col in ws.columns:
                     max_len = max(len(str(cell.value or '')) for cell in col)
                     col_letter = col[0].column_letter
                     ws.column_dimensions[col_letter].width = max(max_len + 4, 13)
 
-                # --- TRACK FILENAME DATE DETAILS ---
+                # Process file names by rounding timestamps
                 try:
                     dates_parsed = pd.to_datetime(df_final['Last Occurred On'], errors='coerce')
                     max_date = dates_parsed.max()
                     if pd.isna(max_date):
                         max_date = datetime.now()
-                        
                     rounded_time = round_to_nearest_30_minutes(max_date)
                     time_string = rounded_time.strftime("%HH%M")
                 except Exception:
@@ -218,12 +221,13 @@ if uploaded_alarm and uploaded_parent:
 
                 filename = f"TIS_ALARMS{time_string}.xlsx"
 
+                # Save spreadsheet down to binary buffer stream
                 output_buffer = io.BytesIO()
                 wb.save(output_buffer)
                 output_buffer.seek(0)
 
                 st.balloons()
-                st.success(f"Report compiled successfully using reference timeline context: {time_string}!")
+                st.success("Report successfully generated!")
                 
                 st.download_button(
                     label=f"📥 Download {filename}",
@@ -233,7 +237,4 @@ if uploaded_alarm and uploaded_parent:
                 )
 
             except Exception as excel_layout_err:
-                st.error(f"❌ Failed to build or style the output Excel workbook: {excel_layout_err}")
-                
-else:
-    st.warning("Waiting for the Alarm Export and Parent Sites reference file to be uploaded...")
+                st.error(f"❌ Spreadsheet rendering or styling crash: {excel_layout_err}")
