@@ -1,6 +1,6 @@
 import streamlit as st
 import pandas as pd
-from openpyxl import load_workbook
+from openpyxl import Workbook
 from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
 from openpyxl.utils.dataframe import dataframe_to_rows
 from datetime import datetime, timedelta
@@ -18,6 +18,8 @@ uploaded_parent = st.file_uploader("3. Upload Parent Sites Reference (Parent-sit
 
 def round_to_nearest_30_minutes(dt):
     """Rounds a datetime object up or down to the nearest 30-minute increment."""
+    if pd.isna(dt):
+        return datetime.now().replace(second=0, microsecond=0)
     minute = dt.minute
     remainder = minute % 30
     if remainder < 15:
@@ -26,7 +28,7 @@ def round_to_nearest_30_minutes(dt):
         dt = dt + timedelta(minutes=(30 - remainder))
     return dt.replace(second=0, microsecond=0)
 
-# THE TRIGGER NOW ONLY DEMANDS THE ALARM EXPORT AND PARENT SITES TO RUN
+# THE TRIGGER DEMANDS THE ALARM EXPORT AND PARENT SITES TO RUN
 if uploaded_alarm and uploaded_parent:
     st.success("Required core files staged successfully.")
     
@@ -34,7 +36,7 @@ if uploaded_alarm and uploaded_parent:
         with st.spinner("Processing network structures and applying styling configurations..."):
             
             # ==========================================
-            # 2. INGEST DATA SOURCES (WITH INSULATED ERROR CATCHING)
+            # 2. INGEST DATA SOURCES
             # ==========================================
             
             # --- STEP A: PARSE ALARM EXPORT ---
@@ -43,13 +45,10 @@ if uploaded_alarm and uploaded_parent:
                     df_alarm = pd.read_csv(uploaded_alarm)
                 else:
                     try:
-                        # Try reading as a standard, native Excel binary file first
                         df_alarm = pd.read_excel(uploaded_alarm)
                     except Exception as excel_err:
-                        # Catch format mismatches (like HTML disguised as an Excel filename)
                         err_msg = str(excel_err).lower()
                         if "not a zip file" in err_msg or "bad zip file" in err_msg:
-                            # Fallback: Parse out tables embedded inside textual plain-text/HTML structures
                             html_tables = pd.read_html(uploaded_alarm)
                             if html_tables:
                                 df_alarm = html_tables[0]
@@ -63,7 +62,6 @@ if uploaded_alarm and uploaded_parent:
 
             # --- STEP B: PARSE PARENT SITES REFERENCE ---
             try:
-                # Setting sheet_name=0 forces pandas to read the first sheet regardless of its custom name
                 df_parent = pd.read_excel(uploaded_parent, sheet_name=0)
             except Exception as parent_err:
                 st.error(f"❌ Error reading the Parent Sites reference file: {parent_err}")
@@ -85,6 +83,8 @@ if uploaded_alarm and uploaded_parent:
 
                 # Prepare parent sites lookup dictionaries
                 parent_child_dict = df_parent.dropna(subset=[df_parent.columns[0]]).set_index(df_parent.columns[0])[df_parent.columns[5]].to_dict()
+                
+                # Column H (Index 7) is our 'Power Co' property in the Parent Sites structure
                 parent_owner_dict = df_parent.dropna(subset=[df_parent.columns[0]]).set_index(df_parent.columns[0])[df_parent.columns[7]].to_dict()
 
                 # ==========================================
@@ -92,23 +92,22 @@ if uploaded_alarm and uploaded_parent:
                 # ==========================================
                 if uploaded_pm:
                     try:
-                        # Fallback to first sheet (sheet_name=0) if custom Q2 names change down the line
                         df_pm = pd.read_excel(uploaded_pm, sheet_name=0)
                         df_pm.iloc[:, 0] = pd.to_numeric(df_pm.iloc[:, 0], errors='coerce') # Col A
                         pm_dict = df_pm.dropna(subset=[df_pm.columns[0]]).set_index(df_pm.columns[0])[df_pm.columns[4]].to_dict()
                         
                         df_clean['Power Owner'] = df_clean['Site ID'].map(pm_dict)
-                        # Fallback to parent file owner if missing in PM file, otherwise fallback to IHS
+                        # Fallback to parent file owner (Power Co) if missing in PM file, otherwise fallback to IHS
                         df_clean['Power Owner'] = df_clean['Power Owner'].fillna(df_clean['Site ID'].map(parent_owner_dict)).fillna("IHS")
                     except Exception as pm_err:
-                        st.warning(f"⚠️ Could not parse PM Plan sheet properly ({pm_err}). Defaulting to fallback configurations.")
+                        st.warning(f"⚠️ Could not parse PM Plan sheet properly ({pm_err}). Falling back to Parent Sites Info.")
                         df_clean['Power Owner'] = df_clean['Site ID'].map(parent_owner_dict).fillna("IHS")
                 else:
-                    # If PM file is missing, try parent owner column first, otherwise default everything to IHS
-                    st.info("ℹ️ PM Plan file missing. Using parent-site mappings and applying 'IHS' fallback.")
+                    # If PM file is completely missing, explicitly fall back to Parent Power Co mappings, else default to IHS
+                    st.info("ℹ️ PM Plan file missing. Mapping owners via Parent Sites 'Power Co' with 'IHS' fallback.")
                     df_clean['Power Owner'] = df_clean['Site ID'].map(parent_owner_dict).fillna("IHS")
 
-                # Get internal children metrics for calculation without adding an unnecessary final column
+                # Get internal children metrics for calculation
                 temp_children = df_clean['Site ID'].map(parent_child_dict)
 
                 # Generate the text predictions directly based on numeric values
@@ -128,7 +127,7 @@ if uploaded_alarm and uploaded_parent:
                 df_final = df_final.sort_values(by='Site ID')
 
             except KeyError as key_err:
-                st.error(f"❌ Column Mapping Error: One or more expected columns (e.g., 'Site ID', 'Site Name', etc.) were missing from your file headers. Details: {key_err}")
+                st.error(f"❌ Column Mapping Error: One or more expected columns were missing from your file headers. Details: {key_err}")
                 st.stop()
             except Exception as processing_err:
                 st.error(f"❌ Error during data transformation: {processing_err}")
@@ -136,8 +135,6 @@ if uploaded_alarm and uploaded_parent:
 
             # --- STEP D: EXCEL PRESENTATION ENGINE (openpyxl) ---
             try:
-                from openpyxl import Workbook
-                # Instantiate a clean workbook object directly instead of loading an empty stream
                 wb = Workbook()
                 ws = wb.active
                 ws.title = "Power Alarms Status"
@@ -173,7 +170,6 @@ if uploaded_alarm and uploaded_parent:
                         cell.font = data_font
                         cell.border = grid_border
                         
-                        # Center code indices and dates, left-align names/text
                         if col in [1, 5, 7, 8, 9]:
                             cell.alignment = Alignment(horizontal="center")
                         else:
@@ -185,10 +181,24 @@ if uploaded_alarm and uploaded_parent:
                     col_letter = col[0].column_letter
                     ws.column_dimensions[col_letter].width = max(max_len + 4, 13)
 
-                # 5. DYNAMIC TIME STAMP & FILENAME CALCULATION
-                current_time = datetime.now()
-                rounded_time = round_to_nearest_30_minutes(current_time)
-                time_string = rounded_time.strftime("%HH%M")
+                # ==========================================
+                # 5. DYNAMIC FILENAME VIA LAST OCCURRED ON
+                # ==========================================
+                try:
+                    # Convert column to datetime context safely to evaluate max values
+                    dates_parsed = pd.to_datetime(df_final['Last Occurred On'], errors='coerce')
+                    max_date = dates_parsed.max()
+                    
+                    if pd.isna(max_date):
+                        # Total fallback if the date column fields were completely unparseable or blank
+                        max_date = datetime.now()
+                        
+                    rounded_time = round_to_nearest_30_minutes(max_date)
+                    time_string = rounded_time.strftime("%HH%M")
+                except Exception:
+                    # Ultra fallback to keep the code from crashing over date variations
+                    time_string = datetime.now().strftime("%HH%M")
+
                 filename = f"TIS_ALARMS{time_string}.xlsx"
 
                 # Save resulting spreadsheet asset out to local memory buffers
@@ -197,7 +207,7 @@ if uploaded_alarm and uploaded_parent:
                 output_buffer.seek(0)
 
                 st.balloons()
-                st.success(f"Report compiled successfully for period context: {time_string}!")
+                st.success(f"Report compiled successfully using reference timeline context: {time_string}!")
                 
                 st.download_button(
                     label=f"📥 Download {filename}",
