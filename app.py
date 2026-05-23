@@ -12,7 +12,7 @@ st.set_page_config(page_title="Power Alarms Processor", page_icon="⚡", layout=
 st.title("⚡ Power Alarms Automation Dashboard")
 st.write("Upload your fresh dashboard export and reference files to build your formatted report.")
 
-# 1. FILE UPLOAD INTERFACE (Now accepts .zip files natively!)
+# 1. FILE UPLOAD INTERFACE
 uploaded_alarm = st.file_uploader("1. Upload Power Alarm Export (.xlsx, .csv, or .zip)", type=["xlsx", "csv", "zip"])
 uploaded_pm = st.file_uploader("2. [OPTIONAL] Upload PM Plan Reference (Defaults to 'IHS' if missing)", type=["xlsx"])
 uploaded_parent = st.file_uploader("3. Upload Parent Sites Reference (Parent-sites-Tx...)", type=["xlsx"])
@@ -45,23 +45,17 @@ if uploaded_alarm and uploaded_parent:
                 alarm_file_stream = uploaded_alarm
                 file_name = uploaded_alarm.name.lower()
 
-                # If it's a zip file, open it in memory and extract the real data file inside
                 if file_name.endswith('.zip'):
                     with zipfile.ZipFile(uploaded_alarm) as z:
-                        # Get the list of filenames inside the zip archive
                         zip_files = z.namelist()
                         if not zip_files:
                             st.error("❌ The uploaded .zip file is empty.")
                             st.stop()
                         
-                        # Target the first file inside the archive
                         internal_filename = zip_files[0]
-                        file_name = internal_filename.lower() # update pointer to match internal file type
-                        
-                        # Read the raw compressed bytes into an in-memory buffer
+                        file_name = internal_filename.lower()
                         alarm_file_stream = io.BytesIO(z.read(internal_filename))
 
-                # Now read the stream based on its actual core format (CSV or Excel)
                 if file_name.endswith('.csv'):
                     df_alarm = pd.read_csv(alarm_file_stream)
                 else:
@@ -78,7 +72,7 @@ if uploaded_alarm and uploaded_parent:
                         else:
                             raise excel_err
             except Exception as read_err:
-                st.error(f"❌ Could not parse the Alarm Export file: {read_err}. If it continues failing, open the file in Excel manually and use 'Save As' to re-save it explicitly as a true 'Excel Workbook (*.xlsx)'.")
+                st.error(f"❌ Could not parse the Alarm Export file: {read_err}.")
                 st.stop()
 
             # --- STEP B: PARSE PARENT SITES REFERENCE ---
@@ -90,61 +84,70 @@ if uploaded_alarm and uploaded_parent:
 
             # --- STEP C: PROCESSING DATA PIPELINE ---
             try:
-                # Ensure consistent structures and safely convert Site IDs to numeric
-                df_alarm['Site ID'] = pd.to_numeric(df_alarm['Site ID'], errors='coerce')
-                df_parent.iloc[:, 0] = pd.to_numeric(df_parent.iloc[:, 0], errors='coerce')  # Col A
-
-                # Remove NaN Site IDs to prevent merge issues
+                # Core Alarm Cleanup: Strip formatting and cast to clean numeric integers
+                df_alarm['Site ID'] = pd.to_numeric(df_alarm['Site ID'].astype(str).str.strip(), errors='coerce')
                 df_alarm = df_alarm.dropna(subset=['Site ID'])
                 df_alarm['Site ID'] = df_alarm['Site ID'].astype(int)
 
-                # 3. DATA CLEANING & RE-ORDERING
+                # Parent Sites Cleanup: Standardize Column A tracking indices
+                df_parent.iloc[:, 0] = pd.to_numeric(df_parent.iloc[:, 0].astype(str).str.strip(), errors='coerce')
+                df_parent_clean = df_parent.dropna(subset=[df_parent.columns[0]]).copy()
+                df_parent_clean.iloc[:, 0] = df_parent_clean.iloc[:, 0].astype(int)
+
                 keep_cols = ['Site ID', 'Site Name', 'Ticket ID', 'Alarm Name', 'First Occurred On', 'Duration(hh:mm:ss)', 'Last Occurred On']
                 df_clean = df_alarm[keep_cols].copy()
 
-                # Prepare parent sites lookup dictionaries
-                parent_child_dict = df_parent.dropna(subset=[df_parent.columns[0]]).set_index(df_parent.columns[0])[df_parent.columns[5]].to_dict()
-                parent_owner_dict = df_parent.dropna(subset=[df_parent.columns[0]]).set_index(df_parent.columns[0])[df_parent.columns[7]].to_dict()
+                # Build lookups from standard parent references
+                parent_child_dict = df_parent_clean.set_index(df_parent_clean.columns[0])[df_parent_clean.columns[5]].to_dict()
+                parent_owner_dict = df_parent_clean.set_index(df_parent_clean.columns[0])[df_parent_clean.columns[7]].to_dict()
 
                 # ==========================================
-                # DYNAMIC POWER OWNER DEFAULT LOGIC
+                # HARDENED DYNAMIC POWER OWNER LOGIC
                 # ==========================================
                 if uploaded_pm:
                     try:
                         df_pm = pd.read_excel(uploaded_pm, sheet_name=0)
-                        df_pm.iloc[:, 0] = pd.to_numeric(df_pm.iloc[:, 0], errors='coerce') # Col A
-                        pm_dict = df_pm.dropna(subset=[df_pm.columns[0]]).set_index(df_pm.columns[0])[df_pm.columns[4]].to_dict()
                         
+                        # Fix data types: strip spaces, drop invalid rows, cast to uniform integers
+                        df_pm.iloc[:, 0] = pd.to_numeric(df_pm.iloc[:, 0].astype(str).str.strip(), errors='coerce')
+                        df_pm_clean = df_pm.dropna(subset=[df_pm.columns[0]]).copy()
+                        df_pm_clean.iloc[:, 0] = df_pm_clean.iloc[:, 0].astype(int)
+                        
+                        # Build mapping dictionary out of pure, uniform types
+                        pm_dict = df_pm_clean.set_index(df_pm_clean.columns[0])[df_pm_clean.columns[4]].to_dict()
+                        
+                        # Try mapping directly via PM Plan reference
                         df_clean['Power Owner'] = df_clean['Site ID'].map(pm_dict)
-                        df_clean['Power Owner'] = df_clean['Power Owner'].fillna(df_clean['Site ID'].map(parent_owner_dict)).fillna("IHS")
+                        
+                        # Fallback step 1: If PM Plan didn't have it, try mapping from Parent Sites Power Co
+                        df_clean['Power Owner'] = df_clean['Power Owner'].fillna(df_clean['Site ID'].map(parent_owner_dict))
+                        
+                        # Fallback step 2: If neither file contains the site, default strictly to "IHS"
+                        df_clean['Power Owner'] = df_clean['Power Owner'].fillna("IHS")
+                        
                     except Exception as pm_err:
-                        st.warning(f"⚠️ Could not parse PM Plan sheet properly ({pm_err}). Falling back to Parent Sites Info.")
+                        st.warning(f"⚠️ Could not cleanly match the PM Plan tracking columns ({pm_err}). Relying on Parent reference data details.")
                         df_clean['Power Owner'] = df_clean['Site ID'].map(parent_owner_dict).fillna("IHS")
                 else:
                     st.info("ℹ️ PM Plan file missing. Mapping owners via Parent Sites 'Power Co' with 'IHS' fallback.")
                     df_clean['Power Owner'] = df_clean['Site ID'].map(parent_owner_dict).fillna("IHS")
 
-                # Get internal children metrics for calculation
+                # Parse operational child site counts 
                 temp_children = df_clean['Site ID'].map(parent_child_dict)
-
-                # Generate the text predictions directly based on numeric values
                 df_clean['Prediction'] = temp_children.apply(
                     lambda x: f"{int(x)} sites will be affected" if pd.notna(x) and isinstance(x, (int, float)) else ""
                 )
 
-                # Assemble final requested target column hierarchy
                 final_column_order = [
                     'Site ID', 'Site Name', 'Power Owner', 'Prediction', 
                     'Ticket ID', 'Alarm Name', 'First Occurred On', 
                     'Duration(hh:mm:ss)', 'Last Occurred On'
                 ]
                 df_final = df_clean[final_column_order].copy()
-
-                # Sort globally by Site ID numerical value
                 df_final = df_final.sort_values(by='Site ID')
 
             except KeyError as key_err:
-                st.error(f"❌ Column Mapping Error: One or more expected columns were missing from your file headers. Details: {key_err}")
+                st.error(f"❌ Column Mapping Error: Expected headers are structural issues. Details: {key_err}")
                 st.stop()
             except Exception as processing_err:
                 st.error(f"❌ Error during data transformation: {processing_err}")
@@ -157,30 +160,25 @@ if uploaded_alarm and uploaded_parent:
                 ws.title = "Power Alarms Status"
                 ws.views.sheetView[0].showGridLines = True
 
-                # Write organized headers and actual data rows
                 ws.append(final_column_order)
                 for r in dataframe_to_rows(df_final, index=False, header=False):
                     ws.append(r)
 
-                # Define structural aesthetics
-                header_fill = PatternFill(start_color="FFC000", end_color="FFC000", fill_type="solid") # #FFC000 Gold
+                header_fill = PatternFill(start_color="FFC000", end_color="FFC000", fill_type="solid")
                 header_font = Font(name="Calibri", size=11, bold=True, color="000000")
                 data_font = Font(name="Calibri", size=11, color="000000")
                 
                 thin_side = Side(border_style="thin", color="D3D3D3")
                 grid_border = Border(left=thin_side, right=thin_side, top=thin_side, bottom=thin_side)
 
-                # Apply layout treatments and add data validation filters
                 ws.auto_filter.ref = f"A1:I{ws.max_row}"
 
-                # Style Headers
                 for cell in ws[1]:
                     cell.fill = header_fill
                     cell.font = header_font
                     cell.alignment = Alignment(horizontal="center", vertical="center")
                     cell.border = grid_border
 
-                # Style Data Grid Rows
                 for row in range(2, ws.max_row + 1):
                     for col in range(1, 10):
                         cell = ws.cell(row=row, column=col)
@@ -192,19 +190,15 @@ if uploaded_alarm and uploaded_parent:
                         else:
                             cell.alignment = Alignment(horizontal="left")
 
-                # Auto-adjust tracking widths dynamically
                 for col in ws.columns:
                     max_len = max(len(str(cell.value or '')) for cell in col)
                     col_letter = col[0].column_letter
                     ws.column_dimensions[col_letter].width = max(max_len + 4, 13)
 
-                # ==========================================
-                # 5. DYNAMIC FILENAME VIA LAST OCCURRED ON
-                # ==========================================
+                # --- TRACK FILENAME DATE DETAILS ---
                 try:
                     dates_parsed = pd.to_datetime(df_final['Last Occurred On'], errors='coerce')
                     max_date = dates_parsed.max()
-                    
                     if pd.isna(max_date):
                         max_date = datetime.now()
                         
@@ -215,7 +209,6 @@ if uploaded_alarm and uploaded_parent:
 
                 filename = f"TIS_ALARMS{time_string}.xlsx"
 
-                # Save resulting spreadsheet asset out to local memory buffers
                 output_buffer = io.BytesIO()
                 wb.save(output_buffer)
                 output_buffer.seek(0)
