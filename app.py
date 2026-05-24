@@ -143,7 +143,7 @@ if uploaded_alarm:
                         return f"{kids_count} sites"
                     return ""
                 
-                df_report['Prediction'] = df_report['Site ID'].apply(determine_prediction)
+                df_report['Number of Dependencies'] = df_report['Site ID'].apply(determine_prediction)
 
                 final_column_order = [
                     'Site ID', 'Site Name', 'Power Owner', 'Number of Dependencies', 
