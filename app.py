@@ -140,13 +140,13 @@ if uploaded_alarm:
                     if is_backbone and kids_count < 5:
                         return "BACKBONE site"
                     elif kids_count > 0:
-                        return f"{kids_count} sites will be affected"
+                        return f"{kids_count} sites"
                     return ""
                 
                 df_report['Prediction'] = df_report['Site ID'].apply(determine_prediction)
 
                 final_column_order = [
-                    'Site ID', 'Site Name', 'Power Owner', 'Prediction', 
+                    'Site ID', 'Site Name', 'Power Owner', 'Number of Dependencies', 
                     'Ticket ID', 'Alarm Name', 'First Occurred On', 
                     'Duration(hh:mm:ss)', 'Last Occurred On'
                 ]
