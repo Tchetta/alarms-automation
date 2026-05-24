@@ -3,6 +3,7 @@ import pandas as pd
 from openpyxl import Workbook
 from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
 from openpyxl.utils.dataframe import dataframe_to_rows
+from openpyxl.utils import get_column_letter
 from datetime import datetime, timedelta
 import io
 import zipfile
@@ -217,10 +218,15 @@ if uploaded_alarm:
                         else:
                             cell.alignment = Alignment(horizontal="left", vertical="center")
 
-                # Track column widths cleanly
-                for col in ws.columns:
-                    max_len = max(len(str(cell.value or '')) for cell in col)
-                    col_letter = col[0].column_letter
+                # Track column widths safely across merged rows using explicit index tracking
+                for col_idx in range(1, 10):
+                    max_len = 0
+                    for row in range(2, ws.max_row + 1):  # Read length starting from Header row downwards
+                        val = str(ws.cell(row=row, column=col_idx).value or '')
+                        if len(val) > max_len:
+                            max_len = len(val)
+                    
+                    col_letter = get_column_letter(col_idx)
                     ws.column_dimensions[col_letter].width = max(max_len + 4, 14)
 
                 # Process production timestamps
@@ -252,3 +258,4 @@ if uploaded_alarm:
 
             except Exception as excel_layout_err:
                 st.error(f"❌ Spreadsheet rendering or styling crash: {excel_layout_err}")
+                
