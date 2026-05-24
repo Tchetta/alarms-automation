@@ -1,0 +1,367 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>⚡ Power Alarms Automation Dashboard</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/exceljs/4.4.0/exceljs.min.js"></script>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: #f4f6f9;
+            color: #333;
+            margin: 0;
+            padding: 40px 20px;
+            display: flex;
+            justify-content: center;
+        }
+        .container {
+            background: #ffffff;
+            padding: 30px;
+            border-radius: 12px;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.08);
+            max-width: 600px;
+            width: 100%;
+        }
+        h1 {
+            color: #222;
+            margin-top: 0;
+            font-size: 24px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        p {
+            color: #666;
+            font-size: 14px;
+            line-height: 1.5;
+            margin-bottom: 25px;
+        }
+        .file-box {
+            border: 2px dashed #ccd1d9;
+            padding: 25px;
+            border-radius: 8px;
+            text-align: center;
+            background: #fafbfc;
+            cursor: pointer;
+            transition: border-color 0.3s;
+            margin-bottom: 20px;
+        }
+        .file-box:hover {
+            border-color: #FFC000;
+        }
+        input[type="file"] {
+            display: none;
+        }
+        .file-label {
+            font-weight: 600;
+            color: #444;
+            display: block;
+            margin-bottom: 5px;
+            cursor: pointer;
+        }
+        .file-info {
+            font-size: 12px;
+            color: #888;
+        }
+        button {
+            background-color: #FFC000;
+            color: #000;
+            border: none;
+            padding: 14px 20px;
+            font-size: 16px;
+            font-weight: bold;
+            border-radius: 6px;
+            width: 100%;
+            cursor: pointer;
+            transition: background-color 0.2s, transform 0.1s;
+        }
+        button:hover {
+            background-color: #e0a800;
+        }
+        button:active {
+            transform: scale(0.98);
+        }
+        button:disabled {
+            background-color: #e6e9ed;
+            color: #aab2bd;
+            cursor: not-allowed;
+            transform: none;
+        }
+        #log-area {
+            margin-top: 20px;
+            background: #1e1e1e;
+            color: #a6e22e;
+            padding: 15px;
+            border-radius: 6px;
+            font-family: 'Courier New', Courier, monospace;
+            font-size: 13px;
+            max-height: 200px;
+            overflow-y: auto;
+            display: none;
+            white-space: pre-wrap;
+        }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h1>⚡ Power Alarms Automation Dashboard</h1>
+    <p>Upload your raw alarm workbook file. The dashboard will instantly fetch the reference database configuration mappings, format the rows, and adjust column sizes.</p>
+    
+    <div class="file-box" onclick="document.getElementById('alarmFile').click()">
+        <span class="file-label" id="file-label-text">📁 Click to Upload Power Alarm Export</span>
+        <span class="file-info">Accepts raw exported .xlsx workbooks</span>
+        <input type="file" id="alarmFile" accept=".xlsx">
+    </div>
+
+    <button id="processBtn" disabled>🚀 Generate Formatted Alarm Report</button>
+    
+    <div id="log-area"></div>
+</div>
+
+<script>
+    const alarmInput = document.getElementById('alarmFile');
+    const processBtn = document.getElementById('processBtn');
+    const logArea = document.getElementById('log-area');
+
+    function log(message, type = 'info') {
+        logArea.style.display = 'block';
+        let prefix = "ℹ️ ";
+        if (type === 'success') prefix = "✅ ";
+        if (type === 'error') prefix = "❌ ";
+        logArea.innerText += prefix + message + "\n";
+        logArea.scrollTop = logArea.scrollHeight;
+    }
+
+    alarmInput.addEventListener('change', (e) => {
+        if (e.target.files.length > 0) {
+            document.getElementById('file-label-text').innerText = `📄 ${e.target.files[0].name}`;
+            processBtn.disabled = false;
+            logArea.innerText = "";
+            logArea.style.display = 'none';
+        }
+    });
+
+    processBtn.addEventListener('click', async () => {
+        processBtn.disabled = true;
+        logArea.innerText = "";
+        
+        try {
+            // Step 1: Fetch and parse ref1.xlsx from the same directory channel
+            log("Connecting to reference master database file (ref1.xlsx)...");
+            const refResponse = await fetch('ref1.xlsx');
+            if (!refResponse.ok) {
+                throw new Error("Could not find 'ref1.xlsx' in the hosting folder directory layout. Verify its placement.");
+            }
+            const refBuffer = await refResponse.arrayBuffer();
+            const refWorkbook = new ExcelJS.Workbook();
+            await refWorkbook.xlsx.load(refBuffer);
+            const refSheet = refWorkbook.worksheets[0];
+
+            log("Syncing database reference dictionaries configurations...");
+            const powerCoMap = {};
+            const childrenMap = {};
+            const backboneMap = {};
+
+            let refHeaders = [];
+            refSheet.getRow(1).eachCell((cell, colNum) => {
+                refHeaders[colNum] = cell.value ? String(cell.value).trim() : '';
+            });
+
+            const idxSiteId = refHeaders.indexOf('Site ID');
+            const idxPowerCo = refHeaders.indexOf('Power Co');
+            const idxChildren = refHeaders.indexOf('Children');
+            const idxBackbone = refHeaders.indexOf('Backbone Site');
+
+            if (idxSiteId === -1 || idxPowerCo === -1 || idxChildren === -1 || idxBackbone === -1) {
+                throw new Error("Reference schema structure error! Check column headers spelling definitions.");
+            }
+
+            refSheet.eachRow((row, rowNum) => {
+                if (rowNum === 1) return;
+                const rawId = row.getCell(idxSiteId).value;
+                if (!rawId) return;
+                const siteId = parseInt(String(rawId).trim(), 10);
+                if (isNaN(siteId)) return;
+
+                powerCoMap[siteId] = row.getCell(idxPowerCo).value ? String(row.getCell(idxPowerCo).value).trim() : "IHS";
+                childrenMap[siteId] = row.getCell(idxChildren).value ? parseFloat(row.getCell(idxChildren).value) : 0;
+                backboneMap[siteId] = row.getCell(idxBackbone).value ? String(row.getCell(idxBackbone).value).trim().toLowerCase() : "";
+            });
+
+            log("Reference engine initialized safely.", "success");
+
+            // Step 2: Read Uploaded Alarm Workbook
+            log("Reading uploaded data payload spreadsheet...");
+            const alarmFile = alarmInput.files[0];
+            const alarmBuffer = await alarmFile.arrayBuffer();
+            const alarmWorkbook = new ExcelJS.Workbook();
+            await alarmWorkbook.xlsx.load(alarmBuffer);
+            const alarmSheet = alarmWorkbook.worksheets[0];
+
+            let alarmHeaders = [];
+            alarmSheet.getRow(1).eachCell((cell, colNum) => {
+                alarmHeaders[colNum] = cell.value ? String(cell.value).trim() : '';
+            });
+
+            const reqCols = ['Site ID', 'Site Name', 'Ticket ID', 'Alarm Name', 'First Occurred On', 'Duration(hh:mm:ss)', 'Last Occurred On'];
+            const columnIndices = {};
+            reqCols.forEach(col => {
+                columnIndices[col] = alarmHeaders.indexOf(col);
+            });
+
+            const missingCols = reqCols.filter(col => columnIndices[col] === -1);
+            if (missingCols.length > 0) {
+                throw new Error(`Data structure error! Upload missing columns: ${missingCols.join(', ')}`);
+            }
+
+            log("Transforming records and evaluating updated dependency rule matrix conditions...");
+            const finalData = [];
+            let maxDate = new Date(0);
+
+            alarmSheet.eachRow((row, rowNum) => {
+                if (rowNum === 1) return;
+                
+                const rawId = row.getCell(columnIndices['Site ID']).value;
+                if (!rawId) return;
+                const siteId = parseInt(String(rawId).trim(), 10);
+                if (isNaN(siteId)) return;
+
+                const siteName = row.getCell(columnIndices['Site Name']).value || "";
+                const ticketId = row.getCell(columnIndices['Ticket ID']).value || "";
+                const alarmName = row.getCell(columnIndices['Alarm Name']).value || "";
+                const firstOccurred = row.getCell(columnIndices['First Occurred On']).value || "";
+                const duration = row.getCell(columnIndices['Duration(hh:mm:ss)']).value || "";
+                const lastOccurred = row.getCell(columnIndices['Last Occurred On']).value || "";
+
+                if (lastOccurred) {
+                    const parsedDate = new Date(lastOccurred);
+                    if (!isNaN(parsedDate) && parsedDate > maxDate) {
+                        maxDate = parsedDate;
+                    }
+                }
+
+                const powerOwner = powerCoMap[siteId] || "IHS";
+                const isBackbone = backboneMap[siteId] === 'yes';
+                const kidsCount = childrenMap[siteId] || 0;
+
+                // Updated business labeling logic condition rules matrix
+                let prediction = "";
+                if (isBackbone && kidsCount < 5) {
+                    prediction = "BACKBONE site";
+                } else if (kidsCount > 0) {
+                    prediction = `${parseInt(kidsCount)} sites`;
+                }
+
+                finalData.push({
+                    siteId, siteName, powerOwner, prediction, ticketId, alarmName, firstOccurred, duration, lastOccurred
+                });
+            });
+
+            finalData.sort((a, b) => a.siteId - b.siteId);
+
+            // Step 3: Write Output Workbook Layout Matrix
+            log("Configuring presentation styles layers and applying palette styling rules...");
+            const outWorkbook = new ExcelJS.Workbook();
+            const outSheet = outWorkbook.addWorksheet('Power Alarms Status', {
+                views: [{ showGridLines: true }]
+            });
+
+            // Merged title row banner generation block
+            outSheet.mergeCells('A1:I1');
+            const titleCell = outSheet.getCell('A1');
+            titleCell.value = "Power Alarms on TIS";
+            titleCell.font = { name: 'Calibri', size: 14, bold: true, color: { argb: 'FF000000' } };
+            titleCell.alignment = { horizontal: 'center', vertical: 'middle' };
+            titleCell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFC000' } };
+            outSheet.getRow(1).height = 30;
+
+            // Header mapping structural updates: 'Number of Dependencies' updated target mapping
+            const headers = ['Site ID', 'Site Name', 'Power Owner', 'Number of Dependencies', 'Ticket ID', 'Alarm Name', 'First Occurred On', 'Duration(hh:mm:ss)', 'Last Occurred On'];
+            outSheet.getRow(2).values = headers;
+            outSheet.getRow(2).height = 24;
+
+            outSheet.getRow(2).eachCell((cell) => {
+                cell.font = { name: 'Calibri', size: 11, bold: true, color: { argb: 'FF000000' } };
+                cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFC000' } };
+                cell.alignment = { horizontal: 'center', vertical: 'middle' };
+            });
+
+            finalData.forEach(item => {
+                outSheet.addRow([
+                    item.siteId, item.siteName, item.powerOwner, item.prediction,
+                    item.ticketId, item.alarmName, item.firstOccurred, item.duration, item.lastOccurred
+                ]);
+            });
+
+            const thinBorder = { style: 'thin', color: { argb: 'FF000000' } };
+            const fullBorder = { left: thinBorder, right: thinBorder, top: thinBorder, bottom: thinBorder };
+
+            outSheet.eachRow((row, rowNum) => {
+                if (rowNum > 2) row.height = 18;
+                
+                for (let col = 1; col <= 9; col++) {
+                    const cell = row.getCell(col);
+                    cell.border = fullBorder;
+
+                    if (rowNum > 2) {
+                        cell.font = { name: 'Calibri', size: 11, color: { argb: 'FF000000' } };
+                        if ([1, 5, 7, 8, 9].includes(col)) {
+                            cell.alignment = { horizontal: 'center', vertical: 'middle' };
+                        } else {
+                            cell.alignment = { horizontal: 'left', vertical: 'middle' };
+                        }
+                    }
+                }
+            });
+
+            // Auto fit column tracking configuration rules
+            for (let colIdx = 1; colIdx <= 9; colIdx++) {
+                let maxLen = 14;
+                outSheet.getColumn(colIdx).eachCell((cell, rowNum) => {
+                    if (rowNum > 1 && cell.value) {
+                        const len = String(cell.value).length;
+                        if (len > maxLen) maxLen = len;
+                    }
+                });
+                outSheet.getColumn(colIdx).width = maxLen + 4;
+            }
+
+            outSheet.autoFilter = `A2:I${outSheet.rowCount}`;
+
+            // Datetime string calculation
+            if (maxDate.getTime() === 0) maxDate = new Date();
+            const minutes = maxDate.getMinutes();
+            const remainder = minutes % 30;
+            if (remainder >= 15) {
+                maxDate.setMinutes(minutes + (30 - remainder), 0, 0);
+            } else {
+                maxDate.setMinutes(minutes - remainder, 0, 0);
+            }
+            
+            const pad = (num) => String(num).padStart(2, '0');
+            const timeString = `${pad(maxDate.getHours())}H${pad(maxDate.getMinutes())}`;
+            const filename = `TIS_ALARMS${timeString}.xlsx`;
+
+            log("Downloading processed report sheet...");
+            const buffer = await outWorkbook.xlsx.writeBuffer();
+            const blob = new Blob([buffer], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+            const link = document.createElement("a");
+            link.href = URL.createObjectURL(blob);
+            link.download = filename;
+            link.click();
+
+            log("Report compiled successfully!", "success");
+
+        } catch (error) {
+            log(error.message, "error");
+            console.error(error);
+        } finally {
+            processBtn.disabled = false;
+        }
+    });
+</script>
+
+</body>
+</html>
