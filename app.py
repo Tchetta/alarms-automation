@@ -13,12 +13,12 @@ from openpyxl.utils.dataframe import dataframe_to_rows
 
 # Set browser page layout properties
 st.set_page_config(
-    page_title="Power Alarms Automation Dashboard",
+    page_title="Power Alarms",
     page_icon="⚡",
     layout="centered"
 )
 
-st.title("⚡ Power Alarms Automation Dashboard")
+st.title("⚡ Power Alarms")
 st.markdown(
     "Upload your raw alarm file (supports raw **.xlsx** or compressed **.zip**). "
     "The dashboard will automatically handle decompression and reference correlation maps."
