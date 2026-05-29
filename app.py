@@ -114,6 +114,8 @@ if uploaded_file is not None:
             
             # Build transformed arrays
             final_rows = []
+            is_backbone_list = [] # Store structural flags mapping cleanly to row stylings below
+            
             for _, row in alarm_df.iterrows():
                 sid = row['Site ID']
                 
@@ -122,9 +124,11 @@ if uploaded_file is not None:
                 is_bb = backbone_map.get(sid, "") == 'yes'
                 kids_count = float(children_map.get(sid, 0))
                 
-                # Rule evaluation matrix block
-                if kids_count < 5:
-                    prediction = "BACKBONE site" if is_bb else "5 sites"
+                # Rule evaluation matrix block matching your fixed ternary conditional
+                if is_bb:
+                    prediction = f"{int(kids_count)} site" + ("s" if kids_count > 1 else "")
+                elif kids_count < 5:
+                    prediction = "5 sites"
                 else:
                     prediction = f"{int(kids_count)} sites"
                 
@@ -133,16 +137,24 @@ if uploaded_file is not None:
                     'Site Name': row['Site Name'] if pd.notnull(row['Site Name']) else "",
                     'Power Owner': p_owner,
                     'Number of Dependencies': prediction,
+                    'Number of Directly Dependent Rural Sites': "", # Safe Empty Column 5
                     'Ticket ID': row['Ticket ID'] if pd.notnull(row['Ticket ID']) else "",
                     'Alarm Name': row['Alarm Name'] if pd.notnull(row['Alarm Name']) else "",
                     'First Occurred On': str(row['First Occurred On']) if pd.notnull(row['First Occurred On']) else "",
                     'Duration(hh:mm:ss)': str(row['Duration(hh:mm:ss)']) if pd.notnull(row['Duration(hh:mm:ss)']) else "",
                     'Last Occurred On': str(row['Last Occurred On']) if pd.notnull(row['Last Occurred On']) else ""
                 })
+                is_backbone_list.append(is_bb)
             
             # Construct unified matrix dataframe and sort ascending by ID
             df_final = pd.DataFrame(final_rows)
-            df_final = df_final.sort_values(by='Site ID')
+            # Maintain sorting connection with the styling flag array layout 
+            df_final['_is_backbone'] = is_backbone_list
+            df_final = df_final.sort_values(by='Site ID').reset_index(drop=True)
+            
+            # Extract tracking array cleanly before printing layout rows
+            sorted_backbone_flags = df_final['_is_backbone'].tolist()
+            df_final = df_final.drop(columns=['_is_backbone'])
             
             status_log.info("ℹ️ Configuring presentation styles layers and applying palette styling rules...")
             
@@ -156,7 +168,8 @@ if uploaded_file is not None:
             amber_fill = PatternFill(start_color="FFFFC000", end_color="FFFFC000", fill_type="solid")
             font_title = Font(name="Calibri", size=14, bold=True, color="000000")
             font_header = Font(name="Calibri", size=11, bold=True, color="000000")
-            font_data = Font(name="Calibri", size=11, color="000000")
+            font_data_normal = Font(name="Calibri", size=11, color="000000")
+            font_data_bold = Font(name="Calibri", size=11, bold=True, color="000000")
             
             align_center = Alignment(horizontal="center", vertical="center")
             align_left = Alignment(horizontal="left", vertical="center")
@@ -165,7 +178,7 @@ if uploaded_file is not None:
             full_border = Border(left=thin_side, right=thin_side, top=thin_side, bottom=thin_side)
             
             # Add Title Cell
-            ws.merge_cells('A1:I1')
+            ws.merge_cells('A1:J1') # Updated boundary to J1 to capture all 10 headers
             ws['A1'] = "Power Alarms on TIS"
             ws['A1'].font = font_title
             ws['A1'].fill = amber_fill
@@ -175,12 +188,12 @@ if uploaded_file is not None:
             # Add Headers Row
             headers = list(df_final.columns)
             ws.append(headers)
-            ws.row_dimensions[2].height = 24
-            for col_idx in range(1, 10):
+            ws.row_dimensions[2].height = 38 # Updated to match JS header height rules
+            for col_idx in range(1, 11):
                 cell = ws.cell(row=2, column=col_idx)
                 cell.font = font_header
                 cell.fill = amber_fill
-                cell.alignment = align_center
+                cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
                 cell.border = full_border
                 
             # Append DataFrame rows matching column sequence arrays
@@ -190,31 +203,44 @@ if uploaded_file is not None:
             # Formatting and structural passes over all records
             for row_idx in range(3, ws.max_row + 1):
                 ws.row_dimensions[row_idx].height = 18
-                for col_idx in range(1, 10):
+                is_row_backbone = sorted_backbone_flags[row_idx - 3]
+                
+                for col_idx in range(1, 11):
                     cell = ws.cell(row=row_idx, column=col_idx)
-                    cell.font = font_data
                     cell.border = full_border
+                    
+                    # Apply specific Font Bold rules onto Column 4 for Backbone items
+                    if col_idx == 4 and is_row_backbone:
+                        cell.font = font_data_bold
+                    else:
+                        cell.font = font_data_normal
+                        
                     # Match exact center/left column rules definitions from JavaScript
-                    if col_idx in [1, 5, 7, 8, 9]:
+                    if col_idx in [1, 6, 8, 9, 10]:
                         cell.alignment = align_center
                     else:
                         cell.alignment = align_left
                         
             # Dynamic Column Auto-fitting calculation loop
             for col in ws.columns:
-                max_len = 14
                 # Grab the column letter from the very first cell in the column safely
                 col_letter = col[0].coordinate.rstrip('0123456789') 
+                col_idx = col[0].column
                 
+                if col_idx in [4, 5]:
+                    ws.column_dimensions[col_letter].width = 24
+                    continue
+                
+                max_len = 14
                 for cell in col:
-                    # Skip the title row (row 1) entirely to avoid MergedCell bugs
-                    if cell.row > 1 and cell.value is not None:
+                    # Skip the title and header rows to strictly measure data length values
+                    if cell.row > 2 and cell.value is not None:
                         max_len = max(max_len, len(str(cell.value)))
                         
                 ws.column_dimensions[col_letter].width = max_len + 4
                 
             # Inject dynamic auto-filtering parameters boundaries
-            ws.auto_filter.ref = f"A2:I{ws.max_row}"
+            ws.auto_filter.ref = f"A2:J{ws.max_row}"
             
             # Datetime string formatting calculations rounding to nearest 30 mins
             minutes = max_date.minute
